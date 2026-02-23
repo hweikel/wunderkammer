@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Photo Wunderkammer</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: #000;
+      color: #2f73f7;
+      font-family: monospace;
+      font-size: 13px;
+    }
+
+    /* ── Top bar ─────────────────────────────────────────── */
+
+    #top-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 12px;
+      background: #000;
+      border-bottom: 1px solid #2f73f7;
+      z-index: 100;
+    }
+
+    #filter-input {
+      background: #000;
+      color: #2f73f7;
+      border: 1px solid #2f73f7;
+      padding: 3px 8px;
+      font-family: monospace;
+      font-size: 13px;
+      outline: none;
+      width: 220px;
+    }
+
+    #filter-input::placeholder {
+      color: #2f73f7;
+      opacity: 0.4;
+    }
+
+    #photo-count {
+      color: #2f73f7;
+      white-space: nowrap;
+    }
+
+    /* ── Grid ────────────────────────────────────────────── */
+
+    #grid {
+      margin-top: 37px; /* bar height + 1px border */
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    }
+
+    .cell {
+      background: #000;
+      aspect-ratio: 1 / 1;
+      overflow: hidden;
+      cursor: pointer;
+      position: relative;
+      border-right: 1px solid #2f73f7;
+      border-bottom: 1px solid #2f73f7;
+    }
+
+    .cell img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      padding: 6px;
+    }
+
+    /* ── Modal ───────────────────────────────────────────── */
+
+    /* The modal covers the viewport but has no background —
+       the grid shows through unchanged ("no dimming"). */
+    #modal {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      display: none; /* JS sets to 'flex' when open */
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #modal-img {
+      display: block;
+      max-width: 90vw;
+      max-height: 80vh;
+      object-fit: contain;
+      /* no border, no shadow, no box */
+    }
+
+    #modal-controls {
+      background: #000;
+      padding: 8px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      width: min(90vw, 640px);
+    }
+
+    #modal-tags-row {
+      text-align: center;
+      line-height: 1.6;
+      min-height: 1em;
+    }
+
+    .modal-tag {
+      cursor: pointer;
+      color: #2f73f7;
+    }
+
+    /* pending-remove: underlined to signal "click again to confirm" */
+    .modal-tag.pending {
+      text-decoration: underline;
+    }
+
+    #modal-tag-input {
+      background: #000;
+      color: #2f73f7;
+      border: 1px solid #2f73f7;
+      padding: 3px 8px;
+      font-family: monospace;
+      font-size: 13px;
+      outline: none;
+      width: 200px;
+    }
+
+    #modal-tag-input::placeholder {
+      color: #2f73f7;
+      opacity: 0.4;
+    }
+
+    #modal-delete-msg {
+      color: #2f73f7;
+    }
+  </style>
+</head>
+<body>
+
+<div id="top-bar">
+  <input id="filter-input" type="text" placeholder="filter by tag…"
+         autocomplete="off" spellcheck="false">
+  <span id="photo-count">—</span>
+</div>
+
+<div id="grid"></div>
+
+<!-- Modal: no backdrop, no box — image floats directly over grid -->
+<div id="modal">
+  <img id="modal-img" alt="">
+  <div id="modal-controls">
+    <div id="modal-tags-row"></div>
+    <input id="modal-tag-input" type="text" placeholder="add tag…"
+           autocomplete="off" spellcheck="false">
+    <div id="modal-delete-msg" style="display:none">
+      Delete? Enter to confirm, Escape to cancel
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const BATCH = 200;
+
+// ── Element refs ────────────────────────────────────────────
+
+const $grid           = document.getElementById('grid');
+const $input          = document.getElementById('filter-input');
+const $count          = document.getElementById('photo-count');
+const $modal          = document.getElementById('modal');
+const $modalImg       = document.getElementById('modal-img');
+const $modalControls  = document.getElementById('modal-controls');
+const $modalTagsRow   = document.getElementById('modal-tags-row');
+const $modalTagInput  = document.getElementById('modal-tag-input');
+const $modalDeleteMsg = document.getElementById('modal-delete-msg');
+
+// ── Grid state ──────────────────────────────────────────────
+
+let visiblePhotos = [];  // filenames currently shown in grid
+let totalCount    = 0;   // unfiltered total, cached
+let renderIndex   = 0;
+let lazyObserver  = null;
+
+// ── Modal state ─────────────────────────────────────────────
+
+let modalOpen        = false;
+let modalIndex       = -1;
+let modalFilename    = '';
+let modalTags        = [];
+let deleteMode       = false;
+let pendingRemoveTag = null;
+
+// ── API ─────────────────────────────────────────────────────
+
+async function apiGet(tag) {
+  const url = tag
+    ? `/api/photos?tag=${encodeURIComponent(tag)}`
+    : '/api/photos';
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ── Lazy-load observer ──────────────────────────────────────
+
+function makeObserver() {
+  if (lazyObserver) lazyObserver.disconnect();
+  lazyObserver = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const cell = e.target;
+      if (cell.querySelector('img')) continue;
+      const img = document.createElement('img');
+      img.src = `/photo/${encodeURIComponent(cell.dataset.f)}`;
+      img.alt = cell.dataset.f;
+      cell.appendChild(img);
+      lazyObserver.unobserve(cell);
+    }
+  }, { rootMargin: '400px 0px' });
+}
+
+// ── Chunked DOM render ──────────────────────────────────────
+
+function renderBatch() {
+  const end = Math.min(renderIndex + BATCH, visiblePhotos.length);
+  const frag = document.createDocumentFragment();
+  const newCells = [];
+
+  for (let i = renderIndex; i < end; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.f = visiblePhotos[i];
+    // use data-f at call time so deletion doesn't stale-close over index
+    cell.addEventListener('click', () => onCellClick(cell.dataset.f));
+    frag.appendChild(cell);
+    newCells.push(cell);
+  }
+
+  $grid.appendChild(frag);
+  for (const c of newCells) lazyObserver.observe(c);
+
+  renderIndex = end;
+  if (renderIndex < visiblePhotos.length) setTimeout(renderBatch, 0);
+}
+
+function renderPhotos(photos) {
+  $grid.innerHTML = '';
+  visiblePhotos = photos;
+  renderIndex   = 0;
+  makeObserver();
+  if (photos.length) renderBatch();
+}
+
+// ── Count ───────────────────────────────────────────────────
+
+function updateCount() {
+  $count.textContent =
+    `${visiblePhotos.length.toLocaleString()} / ${totalCount.toLocaleString()}`;
+}
+
+// ── Load ────────────────────────────────────────────────────
+
+async function load(tag) {
+  $count.textContent = '…';
+  try {
+    if (tag) {
+      const [filtered, all] = await Promise.all([apiGet(tag), apiGet('')]);
+      totalCount = all.length;
+      renderPhotos(filtered);
+    } else {
+      const all = await apiGet('');
+      totalCount = all.length;
+      renderPhotos(all);
+    }
+    updateCount();
+  } catch (err) {
+    $count.textContent = 'error';
+    console.error('Failed to load photos:', err);
+  }
+}
+
+// ── Grid filter ─────────────────────────────────────────────
+
+function applyFilter() {
+  const tag = $input.value.trim();
+  const url = new URL(location.href);
+  if (tag) url.searchParams.set('tag', tag);
+  else     url.searchParams.delete('tag');
+  history.pushState(null, '', url);
+  load(tag);
+}
+
+$input.addEventListener('keydown', e => {
+  if (e.key === 'Enter') applyFilter();
+});
+
+// ── Grid cell click ──────────────────────────────────────────
+
+function onCellClick(filename) {
+  const index = visiblePhotos.indexOf(filename);
+  if (index >= 0) openModal(index);
+}
+
+// ── Modal: open / close ──────────────────────────────────────
+
+async function openModal(index) {
+  if (index < 0 || index >= visiblePhotos.length) return;
+
+  modalIndex       = index;
+  modalFilename    = visiblePhotos[index];
+  deleteMode       = false;
+  pendingRemoveTag = null;
+  modalTags        = [];
+
+  $modalImg.src                 = `/photo/${encodeURIComponent(modalFilename)}`;
+  $modalTagInput.value          = '';
+  $modalDeleteMsg.style.display = 'none';
+  renderModalTags();
+
+  $modal.style.display = 'flex';
+  modalOpen = true;
+
+  try {
+    const r = await fetch(`/api/photos/${encodeURIComponent(modalFilename)}/tags`);
+    if (r.ok) {
+      modalTags = await r.json();
+      renderModalTags();
+    }
+  } catch (err) {
+    console.error('Failed to fetch tags:', err);
+  }
+}
+
+function closeModal() {
+  $modal.style.display = 'none';
+  modalOpen        = false;
+  modalFilename    = '';
+  modalTags        = [];
+  deleteMode       = false;
+  pendingRemoveTag = null;
+  $modalImg.src    = '';
+}
+
+// ── Modal: tags ──────────────────────────────────────────────
+
+function renderModalTags() {
+  $modalTagsRow.innerHTML = '';
+  if (modalTags.length === 0) return;
+
+  modalTags.forEach((tag, i) => {
+    if (i > 0) $modalTagsRow.appendChild(document.createTextNode(', '));
+    const span = document.createElement('span');
+    const isPending = pendingRemoveTag === tag;
+    span.className   = 'modal-tag' + (isPending ? ' pending' : '');
+    span.textContent = isPending ? `${tag}?` : tag;
+    span.addEventListener('click', e => { e.stopPropagation(); onTagClick(tag); });
+    $modalTagsRow.appendChild(span);
+  });
+}
+
+async function onTagClick(tag) {
+  if (pendingRemoveTag === tag) {
+    // second click = confirmed
+    pendingRemoveTag = null;
+    try {
+      const r = await fetch(
+        `/api/photos/${encodeURIComponent(modalFilename)}/tags/${encodeURIComponent(tag)}`,
+        { method: 'DELETE' }
+      );
+      if (r.ok) {
+        modalTags = await r.json();
+        renderModalTags();
+      }
+    } catch (err) {
+      console.error('Failed to remove tag:', err);
+    }
+  } else {
+    // first click = mark pending
+    pendingRemoveTag = tag;
+    renderModalTags();
+  }
+}
+
+async function addTag(value) {
+  const tag = value.trim();
+  if (!tag) return;
+  try {
+    const r = await fetch(
+      `/api/photos/${encodeURIComponent(modalFilename)}/tags`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag }),
+      }
+    );
+    if (r.ok) {
+      modalTags = await r.json();
+      $modalTagInput.value = '';
+      renderModalTags();
+    }
+  } catch (err) {
+    console.error('Failed to add tag:', err);
+  }
+}
+
+// ── Modal: delete photo ──────────────────────────────────────
+
+async function confirmDelete() {
+  const fname = modalFilename;
+  const idx   = modalIndex;
+  try {
+    const r = await fetch(`/api/photos/${encodeURIComponent(fname)}`, { method: 'DELETE' });
+    if (!r.ok) return;
+
+    // Remove cell from DOM by filename
+    for (const c of $grid.querySelectorAll('.cell')) {
+      if (c.dataset.f === fname) { c.remove(); break; }
+    }
+
+    // Update state
+    visiblePhotos.splice(idx, 1);
+    totalCount = Math.max(0, totalCount - 1);
+    updateCount();
+
+    // Navigate to adjacent photo, or close if grid is now empty
+    if (visiblePhotos.length === 0) {
+      closeModal();
+    } else {
+      openModal(Math.min(idx, visiblePhotos.length - 1));
+    }
+  } catch (err) {
+    console.error('Failed to delete photo:', err);
+  }
+}
+
+// ── Modal: navigation ────────────────────────────────────────
+
+function navModal(delta) {
+  if (!modalOpen || visiblePhotos.length === 0) return;
+  let i = modalIndex + delta;
+  if (i < 0) i = visiblePhotos.length - 1;
+  if (i >= visiblePhotos.length) i = 0;
+  openModal(i);
+}
+
+// ── Keyboard ─────────────────────────────────────────────────
+
+document.addEventListener('keydown', e => {
+  if (!modalOpen) return;
+
+  const inInput = document.activeElement === $modalTagInput;
+
+  switch (e.key) {
+    case 'Escape':
+      e.preventDefault();
+      if (deleteMode) {
+        deleteMode = false;
+        $modalDeleteMsg.style.display = 'none';
+      } else {
+        closeModal();
+      }
+      break;
+
+    case 'ArrowLeft':
+      if (!inInput) { e.preventDefault(); navModal(-1); }
+      break;
+
+    case 'ArrowRight':
+      if (!inInput) { e.preventDefault(); navModal(1); }
+      break;
+
+    case 'Backspace':
+      // Enter delete-confirm mode only when not typing in the tag input
+      if (!inInput) {
+        e.preventDefault();
+        deleteMode = true;
+        $modalDeleteMsg.style.display = '';
+      }
+      break;
+
+    case 'Enter':
+      if (deleteMode) { e.preventDefault(); confirmDelete(); }
+      break;
+  }
+});
+
+// Tag input: Enter adds a tag (stopPropagation keeps it from document handler)
+$modalTagInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !deleteMode) {
+    e.stopPropagation();
+    addTag($modalTagInput.value);
+  }
+});
+
+// ── Modal: click to close ────────────────────────────────────
+
+// Clicks on the image or controls must NOT close the modal.
+$modalImg.addEventListener('click',      e => e.stopPropagation());
+$modalControls.addEventListener('click', e => e.stopPropagation());
+
+// Clicking the transparent backdrop (anything that isn't image/controls) closes.
+$modal.addEventListener('click', () => {
+  if (deleteMode) {
+    deleteMode = false;
+    $modalDeleteMsg.style.display = 'none';
+  } else {
+    closeModal();
+  }
+});
+
+// ── Init ─────────────────────────────────────────────────────
+
+(function init() {
+  const tag = new URLSearchParams(location.search).get('tag') || '';
+  if (tag) $input.value = tag;
+  load(tag);
+})();
+</script>
+</body>
+</html>
