@@ -506,6 +506,9 @@ $modalTagInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !deleteMode) {
     e.stopPropagation();
     addTag($modalTagInput.value);
+  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    navModal(e.key === 'ArrowLeft' ? -1 : 1);
   }
 });
 

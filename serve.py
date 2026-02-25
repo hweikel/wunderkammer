@@ -8,6 +8,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
+from typing import Optional
 from urllib.parse import urlparse, parse_qs, unquote
 
 # ---------------------------------------------------------------------------
@@ -97,7 +98,7 @@ class PhotoHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return json.loads(raw)
 
-    def safe_filename(self, raw: str) -> str | None:
+    def safe_filename(self, raw: str) -> Optional[str]:
         """Return the filename if it is safe (no path traversal), else None."""
         name = os.path.basename(unquote(raw))
         if not name or name.startswith("."):
@@ -193,7 +194,12 @@ class PhotoHandler(BaseHTTPRequestHandler):
 
     def _get_photos(self, query: dict) -> None:
         tag_filter = query.get("tag", [None])[0]
-        if tag_filter:
+        if tag_filter == "untagged":
+            result = sorted(
+                fname for fname in PHOTO_CACHE
+                if not TAGS.get(fname)
+            )
+        elif tag_filter:
             result = sorted(
                 fname for fname, tags in TAGS.items()
                 if tag_filter in tags and fname in PHOTO_CACHE
