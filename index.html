@@ -56,6 +56,21 @@
       white-space: nowrap;
     }
 
+    .top-btn {
+      background: #000;
+      color: #2f73f7;
+      border: 1px solid #2f73f7;
+      padding: 3px 8px;
+      font-family: monospace;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .top-btn:hover {
+      background: #2f73f7;
+      color: #000;
+    }
+
     /* ── Grid ────────────────────────────────────────────── */
 
     #grid {
@@ -156,6 +171,8 @@
 <div id="top-bar">
   <input id="filter-input" type="text" placeholder="filter by tag…"
          autocomplete="off" spellcheck="false">
+  <button id="btn-recent" class="top-btn">recent</button>
+  <button id="btn-random" class="top-btn">random</button>
   <span id="photo-count">—</span>
 </div>
 
@@ -184,6 +201,8 @@ const BATCH = 200;
 const $grid           = document.getElementById('grid');
 const $input          = document.getElementById('filter-input');
 const $count          = document.getElementById('photo-count');
+const $btnRecent      = document.getElementById('btn-recent');
+const $btnRandom      = document.getElementById('btn-random');
 const $modal          = document.getElementById('modal');
 const $modalImg       = document.getElementById('modal-img');
 const $modalControls  = document.getElementById('modal-controls');
@@ -197,6 +216,7 @@ let visiblePhotos = [];  // filenames currently shown in grid
 let totalCount    = 0;   // unfiltered total, cached
 let renderIndex   = 0;
 let lazyObserver  = null;
+let currentSort   = '';  // '' = alpha, 'recent' = by mtime
 
 // ── Modal state ─────────────────────────────────────────────
 
@@ -209,11 +229,12 @@ let pendingRemoveTag = null;
 
 // ── API ─────────────────────────────────────────────────────
 
-async function apiGet(tag) {
-  const url = tag
-    ? `/api/photos?tag=${encodeURIComponent(tag)}`
-    : '/api/photos';
-  const r = await fetch(url);
+async function apiGet(tag, sort) {
+  const params = new URLSearchParams();
+  if (tag)  params.set('tag',  tag);
+  if (sort) params.set('sort', sort);
+  const qs = params.toString();
+  const r = await fetch(qs ? `/api/photos?${qs}` : '/api/photos');
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -277,15 +298,15 @@ function updateCount() {
 
 // ── Load ────────────────────────────────────────────────────
 
-async function load(tag) {
+async function load(tag, sort) {
   $count.textContent = '…';
   try {
     if (tag) {
-      const [filtered, all] = await Promise.all([apiGet(tag), apiGet('')]);
+      const [filtered, all] = await Promise.all([apiGet(tag, sort), apiGet('', '')]);
       totalCount = all.length;
       renderPhotos(filtered);
     } else {
-      const all = await apiGet('');
+      const all = await apiGet('', sort);
       totalCount = all.length;
       renderPhotos(all);
     }
@@ -296,6 +317,30 @@ async function load(tag) {
   }
 }
 
+// ── Recent ───────────────────────────────────────────────────
+
+$btnRecent.addEventListener('click', () => {
+  currentSort = 'recent';
+  load($input.value.trim(), 'recent');
+});
+
+// ── Random shuffle ───────────────────────────────────────────
+
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+$btnRandom.addEventListener('click', () => {
+  if (visiblePhotos.length === 0) return;
+  currentSort = '';
+  shuffleInPlace(visiblePhotos);
+  renderPhotos(visiblePhotos);
+  updateCount();
+});
+
 // ── Grid filter ─────────────────────────────────────────────
 
 function applyFilter() {
@@ -304,7 +349,7 @@ function applyFilter() {
   if (tag) url.searchParams.set('tag', tag);
   else     url.searchParams.delete('tag');
   history.pushState(null, '', url);
-  load(tag);
+  load(tag, currentSort);
 }
 
 $input.addEventListener('keydown', e => {
@@ -533,7 +578,7 @@ $modal.addEventListener('click', () => {
 (function init() {
   const tag = new URLSearchParams(location.search).get('tag') || '';
   if (tag) $input.value = tag;
-  load(tag);
+  load(tag, currentSort);
 })();
 </script>
 </body>

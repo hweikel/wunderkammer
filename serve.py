@@ -17,7 +17,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 PHOTOS_DIR: str = ""
 SCRIPT_DIR: Path = Path(__file__).parent
-PHOTO_CACHE: set[str] = set()
+PHOTO_CACHE: dict[str, float] = {}  # filename -> mtime
 TAGS: dict[str, list[str]] = {}
 TAGS_FILE: str = ""
 
@@ -38,14 +38,14 @@ CHUNK_SIZE = 65536  # 64 KB streaming chunks
 
 def load_photo_cache() -> None:
     global PHOTO_CACHE
-    PHOTO_CACHE = set()
+    PHOTO_CACHE = {}
     try:
         with os.scandir(PHOTOS_DIR) as it:
             for entry in it:
                 if entry.is_file():
                     ext = os.path.splitext(entry.name)[1].lower()
                     if ext in PHOTO_EXTENSIONS:
-                        PHOTO_CACHE.add(entry.name)
+                        PHOTO_CACHE[entry.name] = entry.stat().st_mtime
     except OSError as exc:
         print(f"Error scanning directory: {exc}", file=sys.stderr)
 
@@ -194,18 +194,23 @@ class PhotoHandler(BaseHTTPRequestHandler):
 
     def _get_photos(self, query: dict) -> None:
         tag_filter = query.get("tag", [None])[0]
+        sort = query.get("sort", [None])[0]
+
         if tag_filter == "untagged":
-            result = sorted(
-                fname for fname in PHOTO_CACHE
-                if not TAGS.get(fname)
-            )
+            result = [fname for fname in PHOTO_CACHE if not TAGS.get(fname)]
         elif tag_filter:
-            result = sorted(
+            result = [
                 fname for fname, tags in TAGS.items()
                 if tag_filter in tags and fname in PHOTO_CACHE
-            )
+            ]
         else:
-            result = sorted(PHOTO_CACHE)
+            result = list(PHOTO_CACHE)
+
+        if sort == "recent":
+            result.sort(key=lambda f: PHOTO_CACHE[f], reverse=True)
+        else:
+            result.sort()
+
         self.send_json(result)
 
     def _get_tags(self, filename: str) -> None:
@@ -285,7 +290,7 @@ class PhotoHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             self.send_error_json(500, f"Failed to delete: {exc}")
             return
-        PHOTO_CACHE.discard(filename)
+        PHOTO_CACHE.pop(filename, None)
         if filename in TAGS:
             del TAGS[filename]
             save_tags()
