@@ -67,6 +67,17 @@ def save_tags() -> None:
         json.dump(TAGS, fh, indent=2)
 
 
+def backfill_tags() -> None:
+    """Add an empty-array entry for any image file not yet in TAGS, then save."""
+    added = [fname for fname in PHOTO_CACHE if fname not in TAGS]
+    if not added:
+        return
+    for fname in added:
+        TAGS[fname] = []
+    save_tags()
+    print(f"Tags backfilled  : {len(added)} new entries added to tags.json")
+
+
 # ---------------------------------------------------------------------------
 # Request handler
 # ---------------------------------------------------------------------------
@@ -326,6 +337,7 @@ def main() -> None:
 
     load_tags()
     load_photo_cache()
+    backfill_tags()
 
     print(f"Photos directory : {PHOTOS_DIR}")
     print(f"Tags file        : {TAGS_FILE}")
